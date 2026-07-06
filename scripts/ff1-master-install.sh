@@ -60,8 +60,16 @@ banner() {
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少依赖: $1"; }
 # fetch <url> <outfile>: curl 优先，失败/缺失回退 wget（最小 Debian 常只带 wget，或 curl 坏）。
 fetch() {
-  if command -v curl >/dev/null 2>&1 && curl -fLsS --connect-timeout 30 --max-time 900 -o "$2" "$1"; then return 0; fi
-  command -v wget >/dev/null 2>&1 && wget -q -O "$2" "$1"
+  # curl 静默尝试（吞掉 stderr，避免刷 "(28)" 之类吓人报错）；不通再明确改用 wget。
+  # 本类机器常见：curl 直连 github 超时/被封，wget 却能下 —— 所以 wget 是必要回退而非冗余。
+  if command -v curl >/dev/null 2>&1 && curl -fLsS --connect-timeout 20 --max-time 900 -o "$2" "$1" 2>/dev/null; then
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    print_info "curl 未通，改用 wget 下载…" >&2
+    wget -q -O "$2" "$1" && return 0
+  fi
+  return 1
 }
 preflight() {
   command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "需要 curl 或 wget"
@@ -276,7 +284,7 @@ license_key: "${LICENSE_KEY}"
 admin:
   username: "${ADMUSER}"
   password: "${ADMPW}"
-trust_proxy: false
+trust_proxy: true
 EOF
     chmod 0600 "$CONFIG"
     print_success "已生成 ${CONFIG}"
@@ -377,7 +385,7 @@ secret_key: "${SECRET}"
 admin:
   username: "admin"
   password: ""
-trust_proxy: false
+trust_proxy: true
 EOF
     chmod 0600 "$CONFIG"
   fi
