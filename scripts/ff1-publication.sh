@@ -78,11 +78,14 @@ agent_sha256_url() {
   publication_release_download_url "$tag" "ff1core-linux-${arch}.sha256"
 }
 
-# 在线安装脚本（GitHub raw）+ 一键命令（供发版后打印/控制台展示）。
+# 在线安装脚本（GitHub raw，被限流则 jsDelivr CDN 兜底）+ 一键命令（发版后打印/控制台展示）。
 online_install_script_url() { echo "$(publication_scripts_raw_base)/install.sh"; }
+publication_scripts_cdn_base() { echo "https://cdn.jsdelivr.net/gh/${GITHUB_REPO}@${FF1_SCRIPTS_REF}/scripts"; }
+online_install_cdn_url()    { echo "$(publication_scripts_cdn_base)/install.sh"; }
 online_install_curl_pipe() {
   # <master> / <token> 由调用者替换；--channel github 强制从 GitHub 拉 agent 二进制。
-  echo "curl -fsSL $(online_install_script_url) | sudo sh -s -- --master <MASTER_URL> --token <TOKEN> --channel github"
+  # raw 优先，429 就走 jsDelivr。
+  echo "{ curl -fsSL $(online_install_script_url) || curl -fsSL $(online_install_cdn_url); } | sudo sh -s -- --master <MASTER_URL> --token <TOKEN> --channel github"
 }
 
 publication_print_github_release_urls() {

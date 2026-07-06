@@ -12,16 +12,14 @@
 
 ---
 
+> **取脚本地址**：raw 优先；GitHub 对 raw 有按 IP 的匿名限流(429)，被限就走 jsDelivr CDN 兜底
+> `https://cdn.jsdelivr.net/gh/catxtom/ff1-publication@main/scripts/...`。二进制走 Release 下载，不受此限流。
+
 ## 在线安装节点 agent（ff1core）
 
-脚本入口：
-
-```text
-https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/install.sh
-```
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/install.sh \
+{ curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/install.sh \
+  || curl -fsSL https://cdn.jsdelivr.net/gh/catxtom/ff1-publication@main/scripts/install.sh; } \
   | sudo sh -s -- --master <MASTER_URL> --token <TOKEN> --channel github
 ```
 
@@ -29,11 +27,12 @@ curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/script
 - `--channel github`：从本发布仓的 `agent-latest` 拉 `ff1core-linux-<arch>`。
 - 卸载：`... | sudo sh -s -- --uninstall`
 
-## 在线安装 / 自升级 Master
+## 在线安装 / 管理 Master（交互菜单）
 
-```text
-https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/ff1-master-install.sh
+```bash
+bash <(curl -fLSs https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/ff1-master-install.sh \
+     || curl -fLSs https://cdn.jsdelivr.net/gh/catxtom/ff1-publication@main/scripts/ff1-master-install.sh)
 ```
 
 Master 包（`ff1master-linux-<arch>-latest.tar.gz`）见 `master-latest` Release，内嵌前端 SPA +
-`dl/`（随包 ff1core，供 SSH 装机渠道）。
+`dl/`（随包 ff1core，供 SSH 装机渠道）+ `ff1-migrate-v1`（老 ff1panel→新 FF1 迁移工具）。

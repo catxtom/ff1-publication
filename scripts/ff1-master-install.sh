@@ -129,8 +129,9 @@ swap_binary() {
   if [ -r "$0" ] && [ -f "$0" ]; then
     cp -f "$0" "$SELF_COPY" 2>/dev/null || true
   else
-    curl -fLsS -o "$SELF_COPY" \
-      "https://raw.githubusercontent.com/${REPO}/main/scripts/ff1-master-install.sh" 2>/dev/null || true
+    # raw 优先，被 GitHub 限流(429)就走 jsDelivr CDN 兜底。
+    curl -fLsS -o "$SELF_COPY" "https://raw.githubusercontent.com/${REPO}/main/scripts/ff1-master-install.sh" 2>/dev/null \
+      || curl -fLsS -o "$SELF_COPY" "https://cdn.jsdelivr.net/gh/${REPO}@main/scripts/ff1-master-install.sh" 2>/dev/null || true
   fi
   chmod +x "$SELF_COPY" 2>/dev/null || true
   [ -f "${pkg}/configs/master.example.yaml" ] && cp -f "${pkg}/configs/master.example.yaml" "${ETC}/master.example.yaml" || true
@@ -175,6 +176,10 @@ server_ips() {
   local h; h="$(hostname -I 2>/dev/null | awk '{print $1}')"; [ -n "$h" ] && echo "$h"
 }
 
+# gen_pw / gen_user：随机 14 位密码 + 随机 6 位用户名（老版 FF1 都是自动生成 + 展示）。
+gen_pw()   { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 14; echo; }
+gen_user() { printf 'a'; LC_ALL=C tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 5; echo; }
+
 show_entry() {
   local port url
   url="$(grep -E '^public_url:' "$CONFIG" 2>/dev/null | sed 's/^public_url:[[:space:]]*//; s/"//g')"
@@ -196,21 +201,20 @@ do_fresh_install() {
   preflight
   banner
   print_info "全新安装 FF1 Master（${ARCH}）"
-  # 交互：端口 / public_url / 管理员密码（老版还问 License；FF1 授权在面板里填/迁移带入）
-  local PORT PUBURL ADMPW
+  # 老版 FF1 流程：只问端口，其余全自动。public_url 自动用检测到的 IP:端口（NAT/域名场景在
+  # 面板或 ${CONFIG} 里改）；管理员密码自动随机生成并在装完显示（FF1_ADMIN_PASSWORD 可覆盖）。
+  local PORT PUBURL ADMPW ADMUSER LICENSE_KEY defip
   while :; do
     read -r -p "$(echo -e "${GREEN}?${NC} 管理后台端口 [8443]: ")" PORT; PORT="${PORT:-8443}"
     case "$PORT" in ''|*[!0-9]*) print_warn "端口必须是数字" ;; *) [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] && break; print_warn "端口范围 1-65535" ;; esac
   done
-  local defip; defip="$(server_ips | head -1)"; defip="${defip:-127.0.0.1}"
-  read -r -p "$(echo -e "${GREEN}?${NC} 面板访问地址 public_url [http://${defip}:${PORT}]: ")" PUBURL
-  PUBURL="${PUBURL:-http://${defip}:${PORT}}"
-  # public_url/密码会写进 YAML（双引号包裹）；含 " 或 \ 会破坏引号 → 拒绝这些字符。
-  case "$PUBURL" in *[\"\\]*) die "public_url 含非法字符（\" 或 \\）";; esac
-  while :; do
-    read -r -s -p "$(echo -e "${GREEN}?${NC} 管理员密码（回车=随机生成）: ")" ADMPW; echo
-    case "$ADMPW" in *[\"\\]*) print_warn "密码不能含 \" 或 \\，请重输" ;; *) break ;; esac
-  done
+  # License：装机可填 v2 授权码（留空=装完在面板→授权中心填）。老版 FF1 也是装机问。
+  read -r -p "$(echo -e "${GREEN}?${NC} FF1 授权码 License（留空则装完在面板填）: ")" LICENSE_KEY
+  case "$LICENSE_KEY" in *[\"\\]*) print_warn "授权码含非法字符,已忽略"; LICENSE_KEY="" ;; esac
+  defip="$(server_ips | head -1)"; defip="${defip:-127.0.0.1}"
+  PUBURL="${FF1_PUBLIC_URL:-http://${defip}:${PORT}}"
+  ADMUSER="${FF1_ADMIN_USERNAME:-$(gen_user)}"   # 随机 6 位用户名（老版 FF1 也是随机）
+  ADMPW="${FF1_ADMIN_PASSWORD:-$(gen_pw)}"
 
   mkdir -p "$MASTER_DIR/dl" "$ETC" "$DATA_DIR"
   local pkg; pkg="$(fetch_package)" || die "取包/校验失败（见上）"; [ -n "$pkg" ] || die "取包失败：包目录为空"
@@ -225,8 +229,9 @@ public_url: "${PUBURL}"
 log_level: "info"
 dev: false
 secret_key: "${SECRET}"
+license_key: "${LICENSE_KEY}"
 admin:
-  username: "admin"
+  username: "${ADMUSER}"
   password: "${ADMPW}"
 trust_proxy: false
 EOF
@@ -240,7 +245,11 @@ EOF
   systemctl restart ff1-master.service
   if healthy; then
     print_success "安装完成，服务已启动"
-    [ -z "$ADMPW" ] && print_warn "未设密码 → 已随机生成，请查: journalctl -u ff1-master | grep -i password"
+    echo
+    echo -e "  ${GREEN}管理员${NC}  用户名: ${YELLOW}${ADMUSER}${NC}   密码: ${YELLOW}${ADMPW}${NC}"
+    echo -e "  ${RED}请务必记录以上凭据${NC}（写在 ${CONFIG}；改密见菜单或 ff1-master -u <用户> -p <新密码>）"
+    [ -n "$LICENSE_KEY" ] && print_info "授权码已写入配置，首启会自动种入（面板→授权中心可查/换）" \
+                          || print_warn "未填授权码 → 请在面板 设置→授权中心 填 v2 授权码（否则面板会锁）"
     show_entry
     print_info "以后运行 ${GREEN}ff1${NC} 打开本菜单。"
   else
@@ -383,9 +392,38 @@ show_help() {
   echo "  ff1                     - 打开本管理菜单"
   echo "  sudo bash $SELF_COPY -upgrade    - 非交互升级（面板「Master 升级」也走它）"
   echo
+  print_info "修改管理员密码（命令行）："
+  echo "  ${MASTER_DIR}/ff1-master --config ${CONFIG} -u <用户名> -p <新密码>   # 无需重启,立即生效"
+  echo
   print_info "菜单「升级」自动识别："
   echo "  v2（当前 FF1） → 下新包、换 binary+dl/、重启"
   echo "  v1（老 ff1panel） → 停旧服务、备份旧库、装新 FF1、迁数据"
+}
+
+# 修改/新增管理员凭据（走 ff1-master -u/-p，直接改 DB，无需重启）。
+change_admin_password() {
+  [ -x "${MASTER_DIR}/ff1-master" ] || { print_error "未安装 FF1 Master"; return 1; }
+  local u p
+  read -r -p "$(echo -e "${GREEN}?${NC} 管理员用户名 [admin]: ")" u; u="${u:-admin}"
+  read -r -s -p "$(echo -e "${GREEN}?${NC} 新密码: ")" p; echo
+  [ -n "$p" ] || { print_warn "密码不能为空"; return 1; }
+  if "${MASTER_DIR}/ff1-master" --config "$CONFIG" -u "$u" -p "$p"; then
+    print_success "已更新管理员「$u」的密码（立即生效，无需重启）。"
+  else
+    print_error "改密失败 — 查: journalctl -u ff1-master"; return 1
+  fi
+}
+
+# 自更新本管理菜单脚本（raw 优先，429 走 jsDelivr）。
+update_menu_script() {
+  print_info "更新管理菜单脚本…"
+  if curl -fLsS -o "${SELF_COPY}.new" "https://raw.githubusercontent.com/${REPO}/main/scripts/ff1-master-install.sh" 2>/dev/null \
+     || curl -fLsS -o "${SELF_COPY}.new" "https://cdn.jsdelivr.net/gh/${REPO}@main/scripts/ff1-master-install.sh" 2>/dev/null; then
+    mv -f "${SELF_COPY}.new" "$SELF_COPY"; chmod +x "$SELF_COPY"
+    print_success "菜单已更新，重新运行 ff1 生效。"
+  else
+    rm -f "${SELF_COPY}.new"; print_error "下载失败（raw / jsDelivr 都不通）"; return 1
+  fi
 }
 
 # ---------- 交互菜单（对齐老版 show_menu 布局）----------
@@ -405,10 +443,12 @@ menu() {
     echo -e "${YELLOW}———————————————————————————————————${NC}"
     echo -e "${GREEN}8.${NC}  帮助"
     echo -e "${GREEN}9.${NC}  查看管理入口"
+    echo -e "${GREEN}10.${NC} 修改管理员密码"
+    echo -e "${GREEN}00.${NC} 更新管理菜单"
     echo -e "${YELLOW}———————————————————————————————————${NC}"
     echo -e "${RED}0.${NC}  退出"
     echo -e "${BLUE}▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃${NC}"; echo
-    local choice; read -r -p "$(echo -e "${GREEN}请选择操作 [0-9]: ${NC}")" choice
+    local choice; read -r -p "$(echo -e "${GREEN}请选择操作 [0-10, 00]: ${NC}")" choice
     # 动作放子 shell 里跑：里面的 die/exit 只结束子 shell，菜单不会被带崩。
     case "$choice" in
       1) ( do_fresh_install ) ;;
@@ -420,6 +460,8 @@ menu() {
       7) save_db ;;
       8) show_help ;;
       9) show_entry ;;
+      10) ( change_admin_password ) ;;
+      00) ( update_menu_script ) ;;
       0) print_info "退出"; break ;;
       *) print_error "无效选择，请重新输入" ;;
     esac
