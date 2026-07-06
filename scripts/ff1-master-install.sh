@@ -146,6 +146,35 @@ master_rollback() { [ -f "${MASTER_DIR}/ff1-master.bak" ] && mv -f "${MASTER_DIR
 # healthy：要求服务在 settle 窗口内持续 active（Type=simple fork 即报 active，秒崩会漏）。
 healthy() { local i; for i in $(seq 1 8); do sleep 1; systemctl is-active --quiet ff1-master || return 1; done; return 0; }
 
+# 装/升级前先清掉**非 systemd 拉起的残留 master 野进程**：它们占着面板端口、开着老的 state.db，
+# 会让新写入的账号在登录时“看不到”（表现为账号密码明明对却报 invalid）。
+# 精确匹配「<安装目录>/ff1-master 」带全路径+尾空格 → 绝不会误伤本安装脚本 ff1-master-install.sh。
+kill_stale_master() {
+  systemctl stop ff1-master 2>/dev/null || true
+  local pids; pids="$(pgrep -f "${MASTER_DIR}/ff1-master " 2>/dev/null || true)"
+  [ -n "$pids" ] && { print_warn "清理残留 master 野进程: $(echo "$pids" | tr '\n' ' ')"; kill -9 $pids 2>/dev/null || true; sleep 1; }
+  return 0
+}
+
+# 装完自检：**在本机直连 master 登录一次**，当场确认后端认这对账号密码（绕开浏览器/域名/前端/证书）。
+# 成功 → 打印 ✅；失败 → 把后端原始响应打出来，便于一眼定位（而不是让用户去浏览器盲试）。
+verify_login() {
+  local user="$1" pass="$2" port body payload url
+  port="$(grep -E '^http_addr:' "$CONFIG" 2>/dev/null | sed 's/.*://; s/"//g' | tr -d ' ')"
+  [ -n "$port" ] || { print_warn "无法解析端口，跳过登录自检"; return 0; }
+  payload="{\"username\":\"${user}\",\"password\":\"${pass}\"}"
+  url="http://127.0.0.1:${port}/api/auth/login"
+  if command -v curl >/dev/null 2>&1; then
+    body="$(curl -fsS --max-time 10 -X POST "$url" -d "$payload" 2>/dev/null)"
+  else
+    body="$(wget -q -O - --post-data="$payload" "$url" 2>/dev/null)"
+  fi
+  case "$body" in
+    *'"token"'*) print_success "登录自检通过 ✅（后端已接受该账号密码，浏览器登录即可）"; return 0 ;;
+    *) print_warn "登录自检未通过 —— 后端原始响应: ${body:-<空/连接失败>}"; return 1 ;;
+  esac
+}
+
 write_unit() {
   cat >"$UNIT" <<EOF
 [Unit]
@@ -261,6 +290,7 @@ EOF
   fi
 
   write_unit; install_ff1_cli
+  kill_stale_master   # 清掉残留野进程，保证 -u/-p 写入的库与服务读取的是同一个
   # 先用 -u/-p 建库 + 建/改管理员（保证显示的凭据一定能登，绕开"库非空则不 bootstrap"坑），
   # 再起服务（服务见 admin 已存在就不再 bootstrap；旧版二进制无 -u/-p 时回退到服务 bootstrap）。
   "${MASTER_DIR}/ff1-master" --config "$CONFIG" -u "$ADMUSER" -p "$ADMPW" >/dev/null 2>&1 \
@@ -275,6 +305,7 @@ EOF
     echo -e "  ${RED}请务必记录以上凭据${NC}（写在 ${CONFIG}；改密见菜单或 ff1-master -u <用户> -p <新密码>）"
     [ -n "$LICENSE_KEY" ] && print_info "授权码已写入配置，首启会自动种入（面板→授权中心可查/换）" \
                           || print_warn "未填授权码 → 请在面板 设置→授权中心 填 v2 授权码（否则面板会锁）"
+    verify_login "$ADMUSER" "$ADMPW"
     show_entry
     print_info "以后运行 ${GREEN}ff1${NC} 打开本菜单。"
   else
@@ -289,6 +320,7 @@ update_v2() {
   print_info "升级 FF1 Master（binary + dl/，保留 config/data）"
   local pkg; pkg="$(fetch_package)" || die "取包/校验失败（见上）"; [ -n "$pkg" ] || die "取包失败：包目录为空"
   swap_binary "$pkg"
+  kill_stale_master   # 换二进制后清残留野进程，避免旧进程占端口/开着旧库
   systemctl daemon-reload
   systemctl restart ff1-master.service
   if healthy; then
@@ -364,7 +396,7 @@ EOF
   fi
 
   # 起服务（master 见迁入的用户已存在 → 不再 bootstrap 额外 admin）
-  write_unit; install_ff1_cli; systemctl daemon-reload
+  write_unit; install_ff1_cli; kill_stale_master; systemctl daemon-reload
   systemctl enable ff1-master >/dev/null 2>&1 || true
   systemctl restart ff1-master.service
   if healthy; then
