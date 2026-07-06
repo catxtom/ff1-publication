@@ -1,159 +1,147 @@
 #!/usr/bin/env bash
-# ff1-master-install.sh — FF1 Master 安装 / 升级 / 卸载 / 重启（GitHub 发布仓分发）。
+# ff1-master-install.sh — FF1 Master 交互式安装 / 升级 / 卸载 管理器。
 #
-# 1:1 对应 xctl 的 xctl-master-install.sh，但更简单：FF1 master 已内嵌 web + migrations，
-# 发布包只有 ff1-master + dl/(ff1core) + configs + start.sh。
+# 参考老版 ff1panel-master-install.sh 的交互菜单 UX + LicenseCenter 的「升级」自动识别
+# （v1 迁数据 / v2 换程序），适配新 FF1（master 内嵌 web + migrations，发布包只有
+# ff1-master + dl/ + ff1-migrate-v1）。
 #
-#   安装:  curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/ff1-master-install.sh | sudo bash -s -- -install
-#   升级:  sudo bash ff1-master-install.sh -upgrade      # 只换二进制 + dl/，保留 config/data
-#   卸载:  sudo bash ff1-master-install.sh -uninstall
-#   重启:  sudo bash ff1-master-install.sh -restart
-#
-# 升级由面板「Master 升级」按钮后台 detached 调用；也可手动跑。
-set -euo pipefail
+#   交互菜单:  curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/ff1-master-install.sh | sudo bash
+#   装完后:    ff1                      # 随时开菜单
+#   非交互:    sudo bash ff1-master-install.sh -install|-upgrade|-uninstall|-restart
+#   升级由面板「Master 升级」后台 detached 调用 `-upgrade`。
+set -uo pipefail
 
+# ---------- 常量 ----------
 REPO="${FF1_PUBLICATION_REPO:-catxtom/ff1-publication}"
 MASTER_TAG="${MASTER_TAG:-master-latest}"
 MASTER_DIR="${FF1_MASTER_DIR:-/opt/ff1}"
 ETC="${FF1_ETC:-/etc/ff1}"
+DATA_DIR="${ETC}/data"
+BACKUP_DIR="${FF1_BACKUP_DIR:-/root/ff1databack}"
 UNIT=/etc/systemd/system/ff1-master.service
 CONFIG="${ETC}/master.yaml"
-LOCAL_PACKAGE="${LOCAL_PACKAGE:-}"   # 离线：指向本地 ff1master-linux-<arch>-*.tar.gz
-ACTION="install"
-for a in "$@"; do case "$a" in
-  -install|--install) ACTION=install ;;
-  -upgrade|--upgrade) ACTION=upgrade ;;
-  -uninstall|--uninstall) ACTION=uninstall ;;
-  -restart|--restart) ACTION=restart ;;
-esac; done
+SELF_COPY="${ETC}/ff1-master-install.sh"
+FF1_CLI=/usr/local/bin/ff1
+MIGRATE_BIN="${MASTER_DIR}/ff1-migrate-v1"
+LOCAL_PACKAGE="${LOCAL_PACKAGE:-}"   # 离线：本地 ff1master-linux-<arch>-*.tar.gz
 
-log() { echo "ff1-master: $*"; }
-die() { echo "ff1-master: ERROR $*" >&2; exit 1; }
-[ "$(id -u)" = 0 ] || die "must run as root"
-command -v systemctl >/dev/null || die "systemd (systemctl) required"
-command -v curl >/dev/null || die "curl required"
+# 老版 ff1panel（迁移源）痕迹
+V1_DIR=/etc/ff1/ff1master
+V1_CONFIG="${V1_DIR}/configs/master.yaml"
+V1_SERVICE=ff1master
 
-case "$(uname -m)" in
-  x86_64|amd64) ARCH=amd64 ;;
-  aarch64|arm64) ARCH=arm64 ;;
-  *) die "unsupported arch $(uname -m)" ;;
-esac
-PKG_URL="https://github.com/${REPO}/releases/download/${MASTER_TAG}/ff1master-linux-${ARCH}-latest.tar.gz"
+# ---------- 颜色 / 打印（对齐老版 emoji 前缀）----------
+if [ -t 1 ]; then
+  RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
+else RED=; GREEN=; YELLOW=; BLUE=; NC=; fi
+print_info()    { echo -e "${BLUE}🅸${NC} $*"; }
+print_warn()    { echo -e "${YELLOW}🆆${NC} $*"; }
+print_error()   { echo -e "${RED}🅴${NC} $*" >&2; }
+print_success() { echo -e "${GREEN}🆂${NC} $*"; }
+die() { print_error "$*"; exit 1; }
 
-if [ "$ACTION" = restart ]; then
-  systemctl restart ff1-master.service && log "restarted"
-  exit 0
-fi
+banner() {
+  echo -e "${BLUE}▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃${NC}"
+  echo
+  echo -e "  FF1 Master 管理菜单"
+  echo -e "${BLUE}   ________  ________   _____ ${NC}"
+  echo -e "${BLUE}  |\\  _____\\|\\  _____\\ / __  \\ ${NC}"
+  echo -e "${BLUE}  \\ \\  \\__/ \\ \\  \\__/ |\\/_|\\  \\ ${NC}"
+  echo -e "${BLUE}   \\ \\   __\\ \\ \\   __\\\\|/ \\ \\  \\ ${NC}"
+  echo -e "${BLUE}    \\ \\  \\_|  \\ \\  \\_|     \\ \\  \\ ${NC}"
+  echo -e "${BLUE}     \\ \\__\\    \\ \\__\\       \\ \\__\\ ${NC}"
+  echo -e "${BLUE}      \\|__|     \\|__|        \\|__| ${NC}"
+  echo
+  echo -e "${BLUE}▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃${NC}"
+}
 
-if [ "$ACTION" = uninstall ]; then
-  log "uninstalling master (config + data preserved under ${ETC})"
-  systemctl disable --now ff1-master 2>/dev/null || true
-  rm -f "$UNIT"; systemctl daemon-reload 2>/dev/null || true
-  rm -rf "$MASTER_DIR"
-  log "master removed; ${ETC} (config/state.db) kept — remove it manually to purge"
-  exit 0
-fi
+# ---------- 前置检查 ----------
+[ "$(id -u)" = 0 ] || die "must run as root（请用 sudo）"
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少依赖: $1"; }
+preflight() {
+  need_cmd curl; need_cmd systemctl; need_cmd tar
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH=amd64 ;;
+    aarch64|arm64) ARCH=arm64 ;;
+    *) die "unsupported arch $(uname -m)" ;;
+  esac
+  PKG_URL="https://github.com/${REPO}/releases/download/${MASTER_TAG}/ff1master-linux-${ARCH}-latest.tar.gz"
+}
 
-# ---- fetch + extract the master package (install & upgrade share this) ----
-fetch_package() { # -> echoes the extracted package dir
-  local tmp pkg
-  tmp="$(mktemp -d)"
+# ---------- 安装版本识别（对齐 LicenseCenter detect_install_version）----------
+# 输出: none | v1 | v2 | partial
+detect_install_version() {
+  local has_v2=0 has_v1=0
+  local v2_trace=0
+  # complete v2 = binary AND config both present.
+  if [ -x "${MASTER_DIR}/ff1-master" ] && [ -f "$CONFIG" ]; then has_v2=1; fi
+  # any lone v2 trace (binary xor config xor unit) → "partial", but only if not a complete v1/v2.
+  if [ -x "${MASTER_DIR}/ff1-master" ] || [ -f "$CONFIG" ] \
+     || systemctl list-unit-files 2>/dev/null | grep -q '^ff1-master\.service'; then v2_trace=1; fi
+  if [ -f "$V1_CONFIG" ] || [ -d "$V1_DIR" ] \
+     || systemctl list-unit-files 2>/dev/null | grep -q "^${V1_SERVICE}\.service"; then has_v1=1; fi
+  if [ "$has_v2" = 1 ]; then echo v2
+  elif [ "$has_v1" = 1 ]; then echo v1        # a complete v1 wins over a stray v2 trace (offer migrate)
+  elif [ "$v2_trace" = 1 ]; then echo partial
+  else echo none; fi
+}
+
+# ---------- 取包 + 校验 + 解压（install & upgrade 共用）----------
+fetch_package() { # -> echoes 解压后的包目录
+  local tmp; tmp="$(mktemp -d)"
   if [ -n "$LOCAL_PACKAGE" ]; then
-    log "using local package $LOCAL_PACKAGE" >&2
+    print_info "使用本地包 $LOCAL_PACKAGE" >&2
     cp "$LOCAL_PACKAGE" "${tmp}/pkg.tar.gz"
   else
-    log "downloading ${PKG_URL}" >&2
+    print_info "下载 ${PKG_URL}" >&2
     curl -fLsS --connect-timeout 30 --max-time 900 -o "${tmp}/pkg.tar.gz" "$PKG_URL" \
-      || die "download failed: $PKG_URL"
-    # Integrity: verify against the published .sha256 (supply-chain gate; the binary
-    # runs as root). A missing sidecar warns rather than fails, for older releases.
+      || die "下载失败: $PKG_URL"
+    # 完整性：对published .sha256 校验（供应链门；二进制以 root 运行）。缺 sidecar 仅警告。
     if curl -fLsS --connect-timeout 20 -o "${tmp}/pkg.sha256" "${PKG_URL}.sha256" 2>/dev/null; then
+      local want got
       want="$(awk '{print $1}' "${tmp}/pkg.sha256" 2>/dev/null)"
       got="$(sha256sum "${tmp}/pkg.tar.gz" 2>/dev/null | awk '{print $1}')"
-      [ -n "$want" ] && [ "$want" = "$got" ] || die "checksum mismatch (want=${want:-?} got=${got:-?}) — refusing to install"
-      log "checksum ok" >&2
+      [ -n "$want" ] && [ "$want" = "$got" ] || die "校验和不符 (want=${want:-?} got=${got:-?}) — 拒绝安装"
+      print_info "校验和 OK" >&2
     else
-      log "WARN no published .sha256 for the package — skipping integrity check" >&2
+      print_warn "无 published .sha256 — 跳过完整性校验" >&2
     fi
   fi
-  tar -xzf "${tmp}/pkg.tar.gz" -C "$tmp"
-  pkg="${tmp}/ff1master-linux-${ARCH}"
-  [ -x "${pkg}/ff1-master" ] || die "bad package: ${pkg}/ff1-master missing"
+  tar -xzf "${tmp}/pkg.tar.gz" -C "$tmp" || die "解压失败"
+  local pkg="${tmp}/ff1master-linux-${ARCH}"
+  [ -x "${pkg}/ff1-master" ] || die "包结构错误: 缺 ${pkg}/ff1-master"
   echo "$pkg"
 }
 
-# swap_binary <pkg_dir> : replace the binary + dl/, keeping the previous binary as
-# ff1-master.bak (last-known-good for rollback). Preserves config/data.
+# swap_binary <pkg_dir>：原子替换 binary + dl/ + ff1-migrate-v1，保留上一个作 .bak 回滚。
 swap_binary() {
   local pkg="$1"
   mkdir -p "$MASTER_DIR/dl"
   [ -f "${MASTER_DIR}/ff1-master" ] && cp -f "${MASTER_DIR}/ff1-master" "${MASTER_DIR}/ff1-master.bak"
   install -m 0755 "${pkg}/ff1-master" "${MASTER_DIR}/ff1-master.new"
-  mv -f "${MASTER_DIR}/ff1-master.new" "${MASTER_DIR}/ff1-master"   # atomic over running binary
+  mv -f "${MASTER_DIR}/ff1-master.new" "${MASTER_DIR}/ff1-master"   # 原子覆盖运行中的二进制
   ln -sf "${MASTER_DIR}/ff1-master" /usr/local/bin/ff1-master
   [ -d "${pkg}/dl" ] && cp -Rf "${pkg}/dl/." "${MASTER_DIR}/dl/" 2>/dev/null || true
-  # keep a copy of this install script + example config for future self-upgrade
-  cp -f "$0" "${ETC}/ff1-master-install.sh" 2>/dev/null || true
-  chmod +x "${ETC}/ff1-master-install.sh" 2>/dev/null || true
+  # 迁移工具随包分发（v1→v2 用），有则装上
+  [ -f "${pkg}/ff1-migrate-v1" ] && install -m 0755 "${pkg}/ff1-migrate-v1" "$MIGRATE_BIN" 2>/dev/null || true
+  # 存一份本安装脚本 + 示例配置，供 `ff1` 菜单与自升级复用。经 `curl | bash` 安装时 $0 是
+  # "bash"（不是文件），cp 会失败 → 改为:$0 是可读文件就 cp,否则从发布仓拉回规范脚本。
+  if [ -r "$0" ] && [ -f "$0" ]; then
+    cp -f "$0" "$SELF_COPY" 2>/dev/null || true
+  else
+    curl -fLsS -o "$SELF_COPY" \
+      "https://raw.githubusercontent.com/${REPO}/main/scripts/ff1-master-install.sh" 2>/dev/null || true
+  fi
+  chmod +x "$SELF_COPY" 2>/dev/null || true
   [ -f "${pkg}/configs/master.example.yaml" ] && cp -f "${pkg}/configs/master.example.yaml" "${ETC}/master.example.yaml" || true
 }
-
 master_rollback() { [ -f "${MASTER_DIR}/ff1-master.bak" ] && mv -f "${MASTER_DIR}/ff1-master.bak" "${MASTER_DIR}/ff1-master"; }
 
-# healthy: require the unit to STAY active across a settle window (Type=simple
-# reports active on fork, so a binary that panics a few seconds in would pass one check).
-healthy() {
-  local i
-  for i in $(seq 1 8); do
-    sleep 1
-    systemctl is-active --quiet ff1-master || return 1
-  done
-  return 0
-}
+# healthy：要求服务在 settle 窗口内持续 active（Type=simple fork 即报 active，秒崩会漏）。
+healthy() { local i; for i in $(seq 1 8); do sleep 1; systemctl is-active --quiet ff1-master || return 1; done; return 0; }
 
-if [ "$ACTION" = upgrade ]; then
-  [ -x "${MASTER_DIR}/ff1-master" ] || die "not installed (no ${MASTER_DIR}/ff1-master); run -install first"
-  log "upgrading master (binary + dl/ only; config/data preserved)"
-  pkg="$(fetch_package)"
-  swap_binary "$pkg"
-  systemctl daemon-reload
-  systemctl restart ff1-master.service
-  if healthy; then
-    log "upgrade complete, master restarted (kept ff1-master.bak as last-known-good)"
-    exit 0
-  fi
-  log "new master did not stay healthy; rolling back" >&2
-  master_rollback
-  systemctl restart ff1-master.service || true
-  die "rolled back to the previous master — check: journalctl -u ff1-master"
-fi
-
-# ---- fresh install ----
-mkdir -p "$MASTER_DIR/dl" "$ETC"
-pkg="$(fetch_package)"
-swap_binary "$pkg"
-
-# generate a config on first install (secret key + data dir); never overwrite.
-if [ ! -f "$CONFIG" ]; then
-  SECRET="$(head -c 32 /dev/urandom | base64)"
-  cat >"$CONFIG" <<EOF
-http_addr: "0.0.0.0:8443"
-data_dir: "${ETC}/data"
-public_url: "${FF1_PUBLIC_URL:-http://$(hostname -I 2>/dev/null | awk '{print $1}'):8443}"
-log_level: "info"
-dev: false
-secret_key: "${SECRET}"
-admin:
-  username: "admin"
-  password: "${FF1_ADMIN_PASSWORD:-}"
-trust_proxy: false
-EOF
-  chmod 0600 "$CONFIG"
-  log "generated ${CONFIG} (edit public_url / admin as needed)"
-fi
-mkdir -p "${ETC}/data"
-
-cat >"$UNIT" <<EOF
+write_unit() {
+  cat >"$UNIT" <<EOF
 [Unit]
 Description=FF1 Master control panel
 After=network-online.target
@@ -170,13 +158,297 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
+}
 
-systemctl daemon-reload
-systemctl enable ff1-master >/dev/null 2>&1 || true
-systemctl restart ff1-master.service
-if healthy; then
-  log "installed and started. config: ${CONFIG}"
-  log "panel: $(grep -E '^public_url:' "$CONFIG" | sed 's/^public_url:[[:space:]]*//; s/\"//g')"
-else
-  die "master did not start — check: journalctl -u ff1-master"
-fi
+install_ff1_cli() {
+  cat >"$FF1_CLI" <<EOF
+#!/usr/bin/env bash
+# FF1 管理菜单入口（由 ff1-master-install.sh 生成）
+exec bash "${SELF_COPY}" "\$@"
+EOF
+  chmod +x "$FF1_CLI"
+}
+
+server_ips() {
+  ip -4 addr show 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}' \
+    | grep -vE '^(127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | sort -u
+  local h; h="$(hostname -I 2>/dev/null | awk '{print $1}')"; [ -n "$h" ] && echo "$h"
+}
+
+show_entry() {
+  local port url
+  url="$(grep -E '^public_url:' "$CONFIG" 2>/dev/null | sed 's/^public_url:[[:space:]]*//; s/"//g')"
+  port="$(grep -E '^http_addr:' "$CONFIG" 2>/dev/null | sed 's/.*://; s/"//g' | tr -d ' ')"
+  echo; echo -e "${BLUE}▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃${NC}"
+  echo "  FF1 Master 管理入口"
+  echo -e "${BLUE}▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃${NC}"; echo
+  print_info "配置面板访问地址（授权域名门控，社区版不受限）："
+  echo "———————————————————————————————————"
+  [ -n "$url" ] && echo "  public_url: ${url}"
+  local ip; for ip in $(server_ips); do echo "  http://${ip}:${port:-8443}"; done
+  echo "———————————————————————————————————"
+  print_info "管理员：见首次安装输出 / journalctl -u ff1-master | grep -i password"
+  echo
+}
+
+# ---------- 全新安装 ----------
+do_fresh_install() {
+  preflight
+  banner
+  print_info "全新安装 FF1 Master（${ARCH}）"
+  # 交互：端口 / public_url / 管理员密码（老版还问 License；FF1 授权在面板里填/迁移带入）
+  local PORT PUBURL ADMPW
+  while :; do
+    read -r -p "$(echo -e "${GREEN}?${NC} 管理后台端口 [8443]: ")" PORT; PORT="${PORT:-8443}"
+    case "$PORT" in ''|*[!0-9]*) print_warn "端口必须是数字" ;; *) [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] && break; print_warn "端口范围 1-65535" ;; esac
+  done
+  local defip; defip="$(server_ips | head -1)"; defip="${defip:-127.0.0.1}"
+  read -r -p "$(echo -e "${GREEN}?${NC} 面板访问地址 public_url [http://${defip}:${PORT}]: ")" PUBURL
+  PUBURL="${PUBURL:-http://${defip}:${PORT}}"
+  # public_url/密码会写进 YAML（双引号包裹）；含 " 或 \ 会破坏引号 → 拒绝这些字符。
+  case "$PUBURL" in *[\"\\]*) die "public_url 含非法字符（\" 或 \\）";; esac
+  while :; do
+    read -r -s -p "$(echo -e "${GREEN}?${NC} 管理员密码（回车=随机生成）: ")" ADMPW; echo
+    case "$ADMPW" in *[\"\\]*) print_warn "密码不能含 \" 或 \\，请重输" ;; *) break ;; esac
+  done
+
+  mkdir -p "$MASTER_DIR/dl" "$ETC" "$DATA_DIR"
+  local pkg; pkg="$(fetch_package)" || die "取包/校验失败（见上）"; [ -n "$pkg" ] || die "取包失败：包目录为空"
+  swap_binary "$pkg"
+
+  if [ ! -f "$CONFIG" ]; then
+    local SECRET; SECRET="$(head -c 32 /dev/urandom | base64)"
+    cat >"$CONFIG" <<EOF
+http_addr: "0.0.0.0:${PORT}"
+data_dir: "${DATA_DIR}"
+public_url: "${PUBURL}"
+log_level: "info"
+dev: false
+secret_key: "${SECRET}"
+admin:
+  username: "admin"
+  password: "${ADMPW}"
+trust_proxy: false
+EOF
+    chmod 0600 "$CONFIG"
+    print_success "已生成 ${CONFIG}"
+  fi
+
+  write_unit; install_ff1_cli
+  systemctl daemon-reload
+  systemctl enable ff1-master >/dev/null 2>&1 || true
+  systemctl restart ff1-master.service
+  if healthy; then
+    print_success "安装完成，服务已启动"
+    [ -z "$ADMPW" ] && print_warn "未设密码 → 已随机生成，请查: journalctl -u ff1-master | grep -i password"
+    show_entry
+    print_info "以后运行 ${GREEN}ff1${NC} 打开本菜单。"
+  else
+    print_error "master 未能稳定启动 — 查: journalctl -u ff1-master"; return 1
+  fi
+}
+
+# ---------- v2 就地升级（换 binary + dl/，保留 config/data）----------
+update_v2() {
+  preflight
+  [ -x "${MASTER_DIR}/ff1-master" ] || die "未安装（无 ${MASTER_DIR}/ff1-master）；请先全新安装"
+  print_info "升级 FF1 Master（binary + dl/，保留 config/data）"
+  local pkg; pkg="$(fetch_package)" || die "取包/校验失败（见上）"; [ -n "$pkg" ] || die "取包失败：包目录为空"
+  swap_binary "$pkg"
+  systemctl daemon-reload
+  systemctl restart ff1-master.service
+  if healthy; then
+    print_success "升级完成，已重启（保留 ff1-master.bak 作回滚点）"; return 0
+  fi
+  print_warn "新版未稳定，回滚中…"; master_rollback
+  systemctl restart ff1-master.service || true
+  die "已回滚到上一版 — 查: journalctl -u ff1-master"
+}
+
+# ---------- 从旧版 ff1panel 迁移（v1 → v2，自动迁数据）----------
+migrate_from_v1() {
+  preflight
+  banner
+  print_warn "检测到老版 FF1 Panel（ff1panel/ff1master）安装。"
+  print_info "将：停旧服务 → 备份旧库 → 安装新 FF1 → 用迁移工具把节点/规则/用户/设置迁入新库。"
+  echo -en "${YELLOW}继续从旧版迁移升级? [y/N]: ${NC}"; local c; read -r c
+  [[ "$c" =~ ^[Yy]$ ]] || { print_warn "已取消"; return 0; }
+
+  # 定位旧库
+  local v1db=""
+  for cand in "${V1_DIR}/data/master.db" "${V1_DIR}/master.db" /etc/ff1/ff1master/data/master.db; do
+    [ -f "$cand" ] && { v1db="$cand"; break; }
+  done
+  [ -n "$v1db" ] || die "未找到旧版数据库（找过 ${V1_DIR}/data/master.db 等）"
+  print_info "旧库: $v1db"
+
+  # 停旧服务
+  systemctl stop "$V1_SERVICE" 2>/dev/null || true
+  pkill -9 -f ff1master 2>/dev/null || true
+
+  # 备份旧库
+  mkdir -p "$BACKUP_DIR"
+  local snap="${BACKUP_DIR}/v1-master-$(date +%Y%m%d-%H%M%S).db.gz"
+  # 备份必须成功才继续（磁盘满/权限问题就此中止,旧库/服务尚未动）
+  gzip -c "$v1db" > "$snap" || die "旧库备份失败（$snap）—— 已中止，未改动任何东西"
+  print_success "旧库已备份: $snap"
+
+  # 装新 FF1（如尚未装）
+  mkdir -p "$MASTER_DIR/dl" "$ETC" "$DATA_DIR"
+  local pkg; pkg="$(fetch_package)" || die "取包/校验失败（见上）"; [ -n "$pkg" ] || die "取包失败：包目录为空"; swap_binary "$pkg"
+  [ -x "$MIGRATE_BIN" ] || die "迁移工具缺失（${MIGRATE_BIN}）；请用含 ff1-migrate-v1 的新版包"
+
+  # 生成新配置（若无）
+  if [ ! -f "$CONFIG" ]; then
+    local SECRET defip; SECRET="$(head -c 32 /dev/urandom | base64)"; defip="$(server_ips | head -1)"; defip="${defip:-127.0.0.1}"
+    cat >"$CONFIG" <<EOF
+http_addr: "0.0.0.0:8443"
+data_dir: "${DATA_DIR}"
+public_url: "http://${defip}:8443"
+log_level: "info"
+dev: false
+secret_key: "${SECRET}"
+admin:
+  username: "admin"
+  password: ""
+trust_proxy: false
+EOF
+    chmod 0600 "$CONFIG"
+  fi
+
+  # 迁移工具**自己用 FF1 migrations 建新 schema 再灌数据**（新库该有什么全由转换决定，
+  # master 不先启动、不 bootstrap admin —— 新的不动，只把旧的转过来）。
+  print_info "迁移数据 v1 → v2 …"
+  # 传本机 secret_key，让 2FA/SSH 密文按新 master 的编码封装（否则 2FA 会被丢弃需重绑）
+  local SEC; SEC="$(grep -E '^secret_key:' "$CONFIG" 2>/dev/null | sed 's/^secret_key:[[:space:]]*//; s/"//g')"
+  if "$MIGRATE_BIN" --old "$v1db" --new "${DATA_DIR}/state.db" --secret "$SEC"; then
+    print_success "数据迁移完成"
+  else
+    print_error "迁移失败（旧库只读未动、已备份 $snap）"
+    print_info "可修正后重试: ${MIGRATE_BIN} --old $v1db --new ${DATA_DIR}/state.db --secret <key>"
+    return 1
+  fi
+
+  # 起服务（master 见迁入的用户已存在 → 不再 bootstrap 额外 admin）
+  write_unit; install_ff1_cli; systemctl daemon-reload
+  systemctl enable ff1-master >/dev/null 2>&1 || true
+  systemctl restart ff1-master.service
+  if healthy; then
+    print_success "从旧版升级完成，新 FF1 已启动。旧库保留在 $v1db（确认无误后可自行删除）。"
+    show_entry
+  else
+    die "迁移后 master 未稳定 — 查: journalctl -u ff1-master"
+  fi
+}
+
+# ---------- 「升级」菜单：自动识别 v1 / v2 / partial ----------
+do_upgrade() {
+  preflight
+  case "$(detect_install_version)" in
+    v2)      update_v2 ;;
+    v1)      migrate_from_v1 ;;
+    partial) print_warn "检测到半装状态，按全新安装续装…"; do_fresh_install ;;
+    *)       print_error "未检测到可升级的安装"; print_info "空机器请选「全新安装」。" ;;
+  esac
+}
+
+do_uninstall() {
+  echo -en "${YELLOW}确认卸载 FF1 Master?（保留 ${ETC} 配置与数据）[y/N]: ${NC}"; local c; read -r c
+  [[ "$c" =~ ^[Yy]$ ]] || { print_warn "已取消卸载"; return 0; }
+  systemctl disable --now ff1-master 2>/dev/null || true
+  # ⚠ 只杀 daemon（/opt/ff1/ff1-master ...），别用裸 'ff1-master' —— 那会匹配到正在跑本脚本的
+  # `bash /etc/ff1/ff1-master-install.sh` 把自己 SIGKILL 掉,卸载做一半。disable --now 已停服。
+  pkill -9 -f "${MASTER_DIR}/ff1-master " 2>/dev/null || true
+  rm -f "$UNIT"; systemctl daemon-reload 2>/dev/null || true
+  rm -rf "$MASTER_DIR"; rm -f "$FF1_CLI" /usr/local/bin/ff1-master   # 含 swap_binary 建的软链
+  print_success "FF1 Master 已卸载；${ETC}（配置 / state.db）保留 — 需彻底清除请手动 rm -rf ${ETC}"
+}
+
+save_db() {
+  local db="${DATA_DIR}/state.db"
+  [ -f "$db" ] || { print_error "数据库不存在: $db"; return 1; }
+  mkdir -p "$BACKUP_DIR"
+  local out="${BACKUP_DIR}/state-$(date +%Y%m%d-%H%M%S).db.gz"
+  gzip -c "$db" > "$out" && print_success "已备份: $out"
+}
+
+show_help() {
+  print_info "FF1 Master 运维"
+  echo "  systemctl start|stop|restart|status ff1-master"
+  echo "  journalctl -u ff1-master -f"
+  echo "  配置: ${CONFIG}"
+  echo "  数据: ${DATA_DIR}/state.db"
+  echo
+  print_info "全局命令："
+  echo "  ff1                     - 打开本管理菜单"
+  echo "  sudo bash $SELF_COPY -upgrade    - 非交互升级（面板「Master 升级」也走它）"
+  echo
+  print_info "菜单「升级」自动识别："
+  echo "  v2（当前 FF1） → 下新包、换 binary+dl/、重启"
+  echo "  v1（老 ff1panel） → 停旧服务、备份旧库、装新 FF1、迁数据"
+}
+
+# ---------- 交互菜单（对齐老版 show_menu 布局）----------
+menu() {
+  while true; do
+    clear; banner; echo
+    echo -e "${GREEN}1.${NC}  全新安装 FF1 Master"
+    echo -e "${GREEN}2.${NC}  卸载 FF1 Master"
+    echo -e "${YELLOW}———————————————————————————————————${NC}"
+    echo -e "${GREEN}3.${NC}  升级 FF1 Master（当前版换程序 / 旧版迁数据）"
+    echo -e "${YELLOW}———————————————————————————————————${NC}"
+    echo -e "${GREEN}4.${NC}  重启 FF1 Master"
+    echo -e "${GREEN}5.${NC}  停止 FF1 Master"
+    echo -e "${YELLOW}———————————————————————————————————${NC}"
+    echo -e "${GREEN}6.${NC}  查看日志"
+    echo -e "${GREEN}7.${NC}  保存数据库"
+    echo -e "${YELLOW}———————————————————————————————————${NC}"
+    echo -e "${GREEN}8.${NC}  帮助"
+    echo -e "${GREEN}9.${NC}  查看管理入口"
+    echo -e "${YELLOW}———————————————————————————————————${NC}"
+    echo -e "${RED}0.${NC}  退出"
+    echo -e "${BLUE}▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃${NC}"; echo
+    local choice; read -r -p "$(echo -e "${GREEN}请选择操作 [0-9]: ${NC}")" choice
+    # 动作放子 shell 里跑：里面的 die/exit 只结束子 shell，菜单不会被带崩。
+    case "$choice" in
+      1) ( do_fresh_install ) ;;
+      2) ( do_uninstall ) ;;
+      3) ( do_upgrade ) ;;
+      4) systemctl restart ff1-master && print_success "已重启" ;;
+      5) systemctl stop ff1-master && print_success "已停止" ;;
+      6) journalctl -u ff1-master -f ;;
+      7) save_db ;;
+      8) show_help ;;
+      9) show_entry ;;
+      0) print_info "退出"; break ;;
+      *) print_error "无效选择，请重新输入" ;;
+    esac
+    echo; read -r -p "$(echo -e "${YELLOW}按回车键继续...${NC}")" _
+  done
+}
+
+# ---------- 入口：非交互 flag 或 交互菜单 ----------
+main() {
+  local action=""
+  for a in "$@"; do case "$a" in
+    -install|--install) action=install ;;
+    -upgrade|--upgrade) action=upgrade ;;
+    -uninstall|--uninstall) action=uninstall ;;
+    -restart|--restart) action=restart ;;
+  esac; done
+
+  case "$action" in
+    install)   do_fresh_install ;;
+    upgrade)   do_upgrade ;;            # 面板「Master 升级」走这条（v2 就地升级 / v1 迁移）
+    uninstall) need_cmd systemctl; do_uninstall ;;   # 卸载不需要 curl/tar，别 gate 在 preflight
+    restart)   systemctl restart ff1-master && print_success "已重启" ;;
+    "")        # 无参 → 交互菜单。经 `curl | bash` 时 stdin 绑在管道上，read 会立刻 EOF →
+               # 死循环「无效选择」。把 stdin 接回控制终端；接不上就提示改用 flag。
+               if [ ! -t 0 ]; then
+                 if [ -e /dev/tty ]; then exec </dev/tty
+                 else die "无交互终端；请用: sudo bash $0 -install|-upgrade|-uninstall|-restart"; fi
+               fi
+               menu ;;
+  esac
+}
+main "$@"
