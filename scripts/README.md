@@ -20,12 +20,12 @@
 ```bash
 { curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/install.sh \
   || curl -fsSL https://cdn.jsdelivr.net/gh/catxtom/ff1-publication@main/scripts/install.sh; } \
-  | sudo sh -s -- --master <MASTER_URL> --token <TOKEN> --channel github
+  | sh -s -- --master <MASTER_URL> --token <TOKEN> --channel github
 ```
 
 - 全静态二进制（ff1core 内嵌 realm + nginx），POSIX `/bin/sh`，systemd / OpenRC 均支持。
 - `--channel github`：从本发布仓的 `agent-latest` 拉 `ff1core-linux-<arch>`。
-- 卸载：`... | sudo sh -s -- --uninstall`
+- 卸载：`... | sh -s -- --uninstall`
 
 ## 在线安装 / 管理 Master（交互菜单）
 

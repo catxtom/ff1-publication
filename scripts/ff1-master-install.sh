@@ -5,9 +5,9 @@
 # （v1 迁数据 / v2 换程序），适配新 FF1（master 内嵌 web + migrations，发布包只有
 # ff1-master + dl/ + ff1-migrate-v1）。
 #
-#   交互菜单:  curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/ff1-master-install.sh | sudo bash
+#   交互菜单:  curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/ff1-master-install.sh | bash
 #   装完后:    ff1                      # 随时开菜单
-#   非交互:    sudo bash ff1-master-install.sh -install|-upgrade|-uninstall|-restart
+#   非交互:    bash ff1-master-install.sh -install|-upgrade|-uninstall|-restart
 #   升级由面板「Master 升级」后台 detached 调用 `-upgrade`。
 set -uo pipefail
 
@@ -56,10 +56,16 @@ banner() {
 }
 
 # ---------- 前置检查 ----------
-[ "$(id -u)" = 0 ] || die "must run as root（请用 sudo）"
+[ "$(id -u)" = 0 ] || die "请以 root 运行（本脚本自行检测权限，不依赖 sudo）"
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "缺少依赖: $1"; }
+# fetch <url> <outfile>: curl 优先，失败/缺失回退 wget（最小 Debian 常只带 wget，或 curl 坏）。
+fetch() {
+  if command -v curl >/dev/null 2>&1 && curl -fLsS --connect-timeout 30 --max-time 900 -o "$2" "$1"; then return 0; fi
+  command -v wget >/dev/null 2>&1 && wget -q -O "$2" "$1"
+}
 preflight() {
-  need_cmd curl; need_cmd systemctl; need_cmd tar
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "需要 curl 或 wget"
+  need_cmd systemctl; need_cmd tar
   case "$(uname -m)" in
     x86_64|amd64) ARCH=amd64 ;;
     aarch64|arm64) ARCH=arm64 ;;
@@ -94,10 +100,9 @@ fetch_package() { # -> echoes 解压后的包目录
     cp "$LOCAL_PACKAGE" "${tmp}/pkg.tar.gz"
   else
     print_info "下载 ${PKG_URL}" >&2
-    curl -fLsS --connect-timeout 30 --max-time 900 -o "${tmp}/pkg.tar.gz" "$PKG_URL" \
-      || die "下载失败: $PKG_URL"
+    fetch "$PKG_URL" "${tmp}/pkg.tar.gz" || die "下载失败: $PKG_URL"
     # 完整性：对published .sha256 校验（供应链门；二进制以 root 运行）。缺 sidecar 仅警告。
-    if curl -fLsS --connect-timeout 20 -o "${tmp}/pkg.sha256" "${PKG_URL}.sha256" 2>/dev/null; then
+    if fetch "${PKG_URL}.sha256" "${tmp}/pkg.sha256" 2>/dev/null; then
       local want got
       want="$(awk '{print $1}' "${tmp}/pkg.sha256" 2>/dev/null)"
       got="$(sha256sum "${tmp}/pkg.tar.gz" 2>/dev/null | awk '{print $1}')"
@@ -130,8 +135,8 @@ swap_binary() {
     cp -f "$0" "$SELF_COPY" 2>/dev/null || true
   else
     # raw 优先，被 GitHub 限流(429)就走 jsDelivr CDN 兜底。
-    curl -fLsS -o "$SELF_COPY" "https://raw.githubusercontent.com/${REPO}/main/scripts/ff1-master-install.sh" 2>/dev/null \
-      || curl -fLsS -o "$SELF_COPY" "https://cdn.jsdelivr.net/gh/${REPO}@main/scripts/ff1-master-install.sh" 2>/dev/null || true
+    fetch "https://raw.githubusercontent.com/${REPO}/main/scripts/ff1-master-install.sh" "$SELF_COPY" 2>/dev/null \
+      || fetch "https://cdn.jsdelivr.net/gh/${REPO}@main/scripts/ff1-master-install.sh" "$SELF_COPY" 2>/dev/null || true
   fi
   chmod +x "$SELF_COPY" 2>/dev/null || true
   [ -f "${pkg}/configs/master.example.yaml" ] && cp -f "${pkg}/configs/master.example.yaml" "${ETC}/master.example.yaml" || true
@@ -170,10 +175,13 @@ EOF
   chmod +x "$FF1_CLI"
 }
 
+# 检测本机 IPv4：合并 ip-addr + hostname -I 两个来源后**去重**（否则同一 IP 会列多遍），
+# 排除回环/链路本地/Docker 私网。
 server_ips() {
-  ip -4 addr show 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}' \
-    | grep -vE '^(127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | sort -u
-  local h; h="$(hostname -I 2>/dev/null | awk '{print $1}')"; [ -n "$h" ] && echo "$h"
+  { ip -4 addr show 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}'
+    hostname -I 2>/dev/null | tr ' ' '\n'; } \
+  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+  | grep -vE '^(127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[0-1])\.)' | sort -u
 }
 
 # gen_pw / gen_user：随机 14 位密码 + 随机 6 位用户名（老版 FF1 都是自动生成 + 展示）。
@@ -187,10 +195,16 @@ show_entry() {
   echo; echo -e "${BLUE}▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃${NC}"
   echo "  FF1 Master 管理入口"
   echo -e "${BLUE}▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃${NC}"; echo
-  print_info "配置面板访问地址（授权域名门控，社区版不受限）："
+  print_info "配置面板访问地址（请使用授权域名访问）："
   echo "———————————————————————————————————"
-  [ -n "$url" ] && echo "  public_url: ${url}"
-  local ip; for ip in $(server_ips); do echo "  http://${ip}:${port:-8443}"; done
+  [ -n "$url" ] && echo -e "  ${GREEN}public_url${NC}: ${url}"
+  # 其它检测到的本机地址（去掉与 public_url 重复的那条）
+  local ip a
+  for ip in $(server_ips); do
+    a="http://${ip}:${port:-8443}"
+    [ "$a" = "$url" ] && continue
+    echo "  $a"
+  done
   echo "———————————————————————————————————"
   print_info "管理员：见首次安装输出 / journalctl -u ff1-master | grep -i password"
   echo
@@ -226,7 +240,7 @@ do_fresh_install() {
 http_addr: "0.0.0.0:${PORT}"
 data_dir: "${DATA_DIR}"
 public_url: "${PUBURL}"
-log_level: "info"
+log_level: "none"
 dev: false
 secret_key: "${SECRET}"
 license_key: "${LICENSE_KEY}"
@@ -237,9 +251,20 @@ trust_proxy: false
 EOF
     chmod 0600 "$CONFIG"
     print_success "已生成 ${CONFIG}"
+  else
+    # 复用已有配置的管理员凭据（显示与实际一致，不再用新生成的假凭据）
+    local eu ep
+    eu="$(grep -E '^[[:space:]]+username:' "$CONFIG" | head -1 | sed 's/.*username:[[:space:]]*//; s/"//g')"
+    ep="$(grep -E '^[[:space:]]+password:' "$CONFIG" | head -1 | sed 's/.*password:[[:space:]]*//; s/"//g')"
+    [ -n "$eu" ] && ADMUSER="$eu"; [ -n "$ep" ] && ADMPW="$ep"
+    print_info "复用已有配置 ${CONFIG}"
   fi
 
   write_unit; install_ff1_cli
+  # 先用 -u/-p 建库 + 建/改管理员（保证显示的凭据一定能登，绕开"库非空则不 bootstrap"坑），
+  # 再起服务（服务见 admin 已存在就不再 bootstrap；旧版二进制无 -u/-p 时回退到服务 bootstrap）。
+  "${MASTER_DIR}/ff1-master" --config "$CONFIG" -u "$ADMUSER" -p "$ADMPW" >/dev/null 2>&1 \
+    || print_warn "预设管理员未生效（可能是旧版二进制）—— 将由服务按配置 bootstrap"
   systemctl daemon-reload
   systemctl enable ff1-master >/dev/null 2>&1 || true
   systemctl restart ff1-master.service
@@ -390,7 +415,7 @@ show_help() {
   echo
   print_info "全局命令："
   echo "  ff1                     - 打开本管理菜单"
-  echo "  sudo bash $SELF_COPY -upgrade    - 非交互升级（面板「Master 升级」也走它）"
+  echo "  bash $SELF_COPY -upgrade    - 非交互升级（面板「Master 升级」也走它）"
   echo
   print_info "修改管理员密码（命令行）："
   echo "  ${MASTER_DIR}/ff1-master --config ${CONFIG} -u <用户名> -p <新密码>   # 无需重启,立即生效"
@@ -417,8 +442,8 @@ change_admin_password() {
 # 自更新本管理菜单脚本（raw 优先，429 走 jsDelivr）。
 update_menu_script() {
   print_info "更新管理菜单脚本…"
-  if curl -fLsS -o "${SELF_COPY}.new" "https://raw.githubusercontent.com/${REPO}/main/scripts/ff1-master-install.sh" 2>/dev/null \
-     || curl -fLsS -o "${SELF_COPY}.new" "https://cdn.jsdelivr.net/gh/${REPO}@main/scripts/ff1-master-install.sh" 2>/dev/null; then
+  if fetch "https://raw.githubusercontent.com/${REPO}/main/scripts/ff1-master-install.sh" "${SELF_COPY}.new" 2>/dev/null \
+     || fetch "https://cdn.jsdelivr.net/gh/${REPO}@main/scripts/ff1-master-install.sh" "${SELF_COPY}.new" 2>/dev/null; then
     mv -f "${SELF_COPY}.new" "$SELF_COPY"; chmod +x "$SELF_COPY"
     print_success "菜单已更新，重新运行 ff1 生效。"
   else
@@ -488,7 +513,7 @@ main() {
                # 死循环「无效选择」。把 stdin 接回控制终端；接不上就提示改用 flag。
                if [ ! -t 0 ]; then
                  if [ -e /dev/tty ]; then exec </dev/tty
-                 else die "无交互终端；请用: sudo bash $0 -install|-upgrade|-uninstall|-restart"; fi
+                 else die "无交互终端；请用: bash $0 -install|-upgrade|-uninstall|-restart"; fi
                fi
                menu ;;
   esac

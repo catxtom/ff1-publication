@@ -3,10 +3,10 @@
 # cross-distro (systemd + OpenRC), POSIX /bin/sh (runs under bash, dash, busybox ash).
 #
 #   SSH / master 渠道（默认，二进制来自 master 随包 dl/）:
-#     curl -fsSL <master>/install/ff1core.sh | sudo sh -s -- --master <url> --token <tok>
+#     curl -fsSL <master>/install/ff1core.sh | sh -s -- --master <url> --token <tok>
 #   在线渠道（二进制来自 GitHub 发布仓，脚本自 raw.githubusercontent 取）:
 #     curl -fsSL https://raw.githubusercontent.com/catxtom/ff1-publication/main/scripts/install.sh \
-#       | sudo sh -s -- --master <url> --token <tok> --channel github
+#       | sh -s -- --master <url> --token <tok> --channel github
 #   卸载: ... sh -s -- --uninstall
 #
 # ff1core 内嵌 realm + nginx（启动自解压到 FF1_REALM_PATH / FF1_NGINX_PATH），故只下载
@@ -157,9 +157,16 @@ if [ "$ACTION" = "uninstall" ]; then
   exit 0
 fi
 
+# fetch <url> <outfile>: download via curl, falling back to wget. Minimal Debian
+# often ships wget but not curl (or a broken curl) — support both.
+fetch() {
+  if command -v curl >/dev/null 2>&1 && curl -fLsS --connect-timeout 30 --max-time 900 -o "$2" "$1"; then return 0; fi
+  command -v wget >/dev/null 2>&1 && wget -q -O "$2" "$1"
+}
+
 echo "@@FF1:STEP:preflight"
 [ -n "$MASTER" ] && [ -n "$TOKEN" ] || { echo "ff1: usage: --master <url> --token <token> [--channel dl|github]" >&2; exit 1; }
-command -v curl >/dev/null || { echo "ff1: curl is required" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || { echo "ff1: 需要 curl 或 wget" >&2; exit 1; }
 INIT="$(detect_init)"
 [ "$INIT" = none ] && { echo "ff1: 需要 systemd 或 OpenRC init 系统(两者都未检测到)" >&2; exit 1; }
 echo "ff1: init=$INIT"
@@ -261,7 +268,7 @@ provision_capabilities
 
 echo "@@FF1:STEP:download"
 echo "ff1: downloading ff1core ($ARCH) via $CHANNEL: $BIN_URL"
-curl -fLsS --connect-timeout 30 --max-time 600 -o "$BIN/ff1core.new" "$BIN_URL" \
+fetch "$BIN_URL" "$BIN/ff1core.new" \
   || { echo "ff1: ERROR download failed: $BIN_URL" >&2; exit 1; }
 chmod +x "$BIN/ff1core.new"
 [ -f "$BIN/ff1core" ] && cp -f "$BIN/ff1core" "$BIN/ff1core.bak"   # keep last-known-good

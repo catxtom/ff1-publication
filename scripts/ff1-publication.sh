@@ -85,7 +85,7 @@ online_install_cdn_url()    { echo "$(publication_scripts_cdn_base)/install.sh";
 online_install_curl_pipe() {
   # <master> / <token> 由调用者替换；--channel github 强制从 GitHub 拉 agent 二进制。
   # raw 优先，429 就走 jsDelivr。
-  echo "{ curl -fsSL $(online_install_script_url) || curl -fsSL $(online_install_cdn_url); } | sudo sh -s -- --master <MASTER_URL> --token <TOKEN> --channel github"
+  echo "{ curl -fsSL $(online_install_script_url) || curl -fsSL $(online_install_cdn_url); } | sh -s -- --master <MASTER_URL> --token <TOKEN> --channel github"
 }
 
 publication_print_github_release_urls() {
