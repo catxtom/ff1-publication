@@ -148,6 +148,12 @@ swap_binary() {
   fi
   chmod +x "$SELF_COPY" 2>/dev/null || true
   [ -f "${pkg}/configs/master.example.yaml" ] && cp -f "${pkg}/configs/master.example.yaml" "${ETC}/master.example.yaml" || true
+  # GeoIP 库（随包 data/GeoLite2-Country.mmdb）：仅在目标不存在时拷入，避免升级覆盖
+  # 用户用自己 MaxMind key 更新过的更新版本。master 自动探测 <data_dir>/GeoLite2-Country.mmdb。
+  if [ -f "${pkg}/data/GeoLite2-Country.mmdb" ] && [ ! -f "${DATA_DIR}/GeoLite2-Country.mmdb" ]; then
+    mkdir -p "$DATA_DIR"
+    cp -f "${pkg}/data/GeoLite2-Country.mmdb" "${DATA_DIR}/GeoLite2-Country.mmdb" 2>/dev/null || true
+  fi
 }
 master_rollback() { [ -f "${MASTER_DIR}/ff1-master.bak" ] && mv -f "${MASTER_DIR}/ff1-master.bak" "${MASTER_DIR}/ff1-master"; }
 

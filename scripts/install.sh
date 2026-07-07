@@ -140,6 +140,7 @@ healthy() {
 
 if [ "$ACTION" = "uninstall" ]; then
   echo "ff1: uninstalling ff1core"
+  echo "@@FF1:STEP:stop"
   INIT="$(detect_init)"
   if [ "$INIT" = systemd ]; then
     systemctl disable --now ff1core 2>/dev/null || true
@@ -147,8 +148,10 @@ if [ "$ACTION" = "uninstall" ]; then
     rc-service ff1core stop 2>/dev/null || true
     rc-update del ff1core 2>/dev/null || true
   fi
+  echo "@@FF1:STEP:nginx"
   # let ff1core tear down its own nginx footprint (receipt-driven) if present
   "$BIN/ff1core" uninstall-nginx 2>/dev/null || true
+  echo "@@FF1:STEP:remove"
   rm -f "$UNIT" "$OPENRC_INIT" "$OPENRC_CONF"
   [ "$INIT" = systemd ] && { systemctl daemon-reload 2>/dev/null || true; }
   rm -f "$BIN/ff1core" "$REALM_PATH" "$NGINX_PATH"
