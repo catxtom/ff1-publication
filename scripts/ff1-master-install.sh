@@ -252,9 +252,9 @@ do_fresh_install() {
   preflight
   banner
   print_info "全新安装 FF1 Master（${ARCH}）"
-  # 老版 FF1 流程：只问端口，其余全自动。public_url 自动用检测到的 IP:端口（NAT/域名场景在
-  # 面板或 ${CONFIG} 里改）；管理员密码自动随机生成并在装完显示（FF1_ADMIN_PASSWORD 可覆盖）。
-  local PORT PUBURL ADMPW ADMUSER LICENSE_KEY defip
+  # 老版 FF1 流程：只问端口，其余全自动。master 地址不写死 config —— 安装命令由面板按当前
+  # 浏览器访问地址(X-Master-Public-URL)动态生成；管理员密码自动随机并在装完显示。
+  local PORT ADMPW ADMUSER LICENSE_KEY
   while :; do
     read -r -p "$(echo -e "${GREEN}?${NC} 管理后台端口 [8443]: ")" PORT; PORT="${PORT:-8443}"
     case "$PORT" in ''|*[!0-9]*) print_warn "端口必须是数字" ;; *) [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] && break; print_warn "端口范围 1-65535" ;; esac
@@ -262,8 +262,6 @@ do_fresh_install() {
   # License：装机可填 v2 授权码（留空=装完在面板→授权中心填）。老版 FF1 也是装机问。
   read -r -p "$(echo -e "${GREEN}?${NC} FF1 授权码 License（留空则装完在面板填）: ")" LICENSE_KEY
   case "$LICENSE_KEY" in *[\"\\]*) print_warn "授权码含非法字符,已忽略"; LICENSE_KEY="" ;; esac
-  defip="$(server_ips | head -1)"; defip="${defip:-127.0.0.1}"
-  PUBURL="${FF1_PUBLIC_URL:-http://${defip}:${PORT}}"
   ADMUSER="${FF1_ADMIN_USERNAME:-$(gen_user)}"   # 随机 6 位用户名（老版 FF1 也是随机）
   ADMPW="${FF1_ADMIN_PASSWORD:-$(gen_pw)}"
 
@@ -276,7 +274,6 @@ do_fresh_install() {
     cat >"$CONFIG" <<EOF
 http_addr: "0.0.0.0:${PORT}"
 data_dir: "${DATA_DIR}"
-public_url: "${PUBURL}"
 log_level: "none"
 dev: false
 secret_key: "${SECRET}"
@@ -374,11 +371,10 @@ migrate_from_v1() {
 
   # 生成新配置（若无）
   if [ ! -f "$CONFIG" ]; then
-    local SECRET defip; SECRET="$(head -c 32 /dev/urandom | base64)"; defip="$(server_ips | head -1)"; defip="${defip:-127.0.0.1}"
+    local SECRET; SECRET="$(head -c 32 /dev/urandom | base64)"
     cat >"$CONFIG" <<EOF
 http_addr: "0.0.0.0:8443"
 data_dir: "${DATA_DIR}"
-public_url: "http://${defip}:8443"
 log_level: "info"
 dev: false
 secret_key: "${SECRET}"
