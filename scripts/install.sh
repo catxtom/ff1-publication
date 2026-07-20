@@ -201,9 +201,36 @@ detect_pm() {
   else echo none; fi
 }
 
+# wait_apt_lock waits (bounded, best-effort) for another package manager to release
+# the apt/dpkg locks. A fresh VPS commonly runs cloud-init / unattended-upgrades on
+# first boot, holding these locks — without this, our补装 fails immediately with
+# "Could not get lock /var/lib/apt/lists/lock ... held by process N". Polls up to
+# ~120s via fuser; if fuser is absent we just proceed (apt's own -o DPkg::Lock::Timeout
+# below still gives modern apt a native wait). Never fatal — provisioning is graceful.
+wait_apt_lock() {
+  command -v fuser >/dev/null 2>&1 || return 0
+  _waited=0
+  while [ "$_waited" -lt 120 ]; do
+    _held=""
+    for _lk in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
+               /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+      [ -e "$_lk" ] && fuser "$_lk" >/dev/null 2>&1 && { _held=1; break; }
+    done
+    [ -z "$_held" ] && return 0
+    [ "$_waited" = 0 ] && echo "ff1: apt 被其它进程占用(可能 cloud-init/unattended-upgrades),等待锁释放(最多 120s)…"
+    sleep 3
+    _waited=$((_waited + 3))
+  done
+  echo "ff1: WARN 等待 apt 锁超时,仍尝试继续补装" >&2
+  return 0
+}
+
 pkg_install() { # <packages...>
   case "$PM" in
-    apt) DEBIAN_FRONTEND=noninteractive apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+    apt)
+      wait_apt_lock
+      DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -y \
+        && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y "$@" ;;
     dnf) dnf install -y "$@" ;;
     yum) yum install -y "$@" ;;
     zypper) zypper --non-interactive install -y "$@" ;;
